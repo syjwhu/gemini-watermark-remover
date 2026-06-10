@@ -143,18 +143,39 @@ function d4ratio(P,S){
   }
   return et>1e-6 ? es/et : 0;
 }
-// forgiving snap: a loose click near the star locks onto the exact center via local symmetry
+// forgiving snap: a loose click near the star locks onto the exact center via local symmetry.
+// Uses a box-blur "added-white" field (obs - local average) so it sees the whole faint star,
+// not just fine texture -- much more accurate localization.
 function snap(cx,cy){
-  const d=orig.data, S=11, step=8; let best=[-1,cx,cy];
-  for(let oy=-24;oy<=24;oy+=3)for(let ox=-24;ox<=24;ox+=3){
-    let ccx=cx+ox, ccy=cy+oy, P=[], sum=0;
-    for(let r=0;r<S;r++)for(let c=0;c<S;c++){
-      let px=ccx+((c-(S-1)/2)*step|0), py=ccy+((r-(S-1)/2)*step|0);
-      let v=whiteAt(d,px,py,6); P.push(v); sum+=v;
+  const d=orig.data, RB=18, M=68;
+  const rx0=Math.max(RB+1,cx-M), ry0=Math.max(RB+1,cy-M);
+  const rx1=Math.min(W-RB-2,cx+M), ry1=Math.min(H-RB-2,cy+M);
+  const rw=rx1-rx0+1, rh=ry1-ry0+1; if(rw<70||rh<70) return [cx,cy];
+  const ex0=rx0-RB, ey0=ry0-RB, ew=rw+2*RB, eh=rh+2*RB, IW=ew+1;
+  const I0=new Float64Array(IW*(eh+1)), I1=new Float64Array(IW*(eh+1)), I2=new Float64Array(IW*(eh+1));
+  for(let yy=0;yy<eh;yy++){
+    let s0=0,s1=0,s2=0; const py=ey0+yy, b=(yy+1)*IW, bu=yy*IW;
+    for(let xx=0;xx<ew;xx++){
+      const o=(py*W+(ex0+xx))*4; s0+=d[o]; s1+=d[o+1]; s2+=d[o+2];
+      I0[b+xx+1]=I0[bu+xx+1]+s0; I1[b+xx+1]=I1[bu+xx+1]+s1; I2[b+xx+1]=I2[bu+xx+1]+s2;
     }
-    let mean=sum/(S*S); if(mean<1.0) continue;
-    let score=d4ratio(P,S)*mean;
-    if(score>best[0]) best=[score,ccx,ccy];
+  }
+  const boxN=(2*RB+1)*(2*RB+1), aw=new Float32Array(rw*rh);
+  for(let gy=0;gy<rh;gy++)for(let gx=0;gx<rw;gx++){
+    const px=rx0+gx, py=ry0+gy, o=(py*W+px)*4;
+    const cc=gx+RB, rr=gy+RB, xl=cc-RB, xh=cc+RB+1, yl=rr-RB, yh=rr+RB+1;
+    const a0=d[o]  -(I0[yh*IW+xh]-I0[yl*IW+xh]-I0[yh*IW+xl]+I0[yl*IW+xl])/boxN;
+    const a1=d[o+1]-(I1[yh*IW+xh]-I1[yl*IW+xh]-I1[yh*IW+xl]+I1[yl*IW+xl])/boxN;
+    const a2=d[o+2]-(I2[yh*IW+xh]-I2[yl*IW+xh]-I2[yh*IW+xl]+I2[yl*IW+xl])/boxN;
+    const m=Math.min(a0,a1,a2); aw[gy*rw+gx]=m>0?m:0;
+  }
+  const S=11, step=8, at=(px,py)=>{const gx=px-rx0,gy=py-ry0;return(gx>=0&&gy>=0&&gx<rw&&gy<rh)?aw[gy*rw+gx]:0;};
+  let best=[-1,cx,cy];
+  for(let oy=-24;oy<=24;oy+=2)for(let ox=-24;ox<=24;ox+=2){
+    const ccx=cx+ox, ccy=cy+oy, P=new Float64Array(S*S); let sum=0;
+    for(let r=0;r<S;r++)for(let c=0;c<S;c++){const v=at(ccx+(c-5)*step,ccy+(r-5)*step);P[r*S+c]=v;sum+=v;}
+    const mean=sum/(S*S); if(mean<1.0) continue;
+    const sc=d4ratio(P,S)*mean; if(sc>best[0]) best=[sc,ccx,ccy];
   }
   return [best[1],best[2]];
 }
