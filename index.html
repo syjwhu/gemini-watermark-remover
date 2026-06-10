@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gemini 水印去除工具 · 反向 Alpha 混合 · 无损 · 本地处理</title>
+<meta name="description" content="本地、无损去除 Google Gemini 生成图片右下角的白色四角星水印。基于反向 Alpha 混合，点选即可精确去除，支持非标准位置。图片不上传，纯浏览器处理。">
+<style>
+  :root{--bg:#0f1115;--card:#1a1e26;--ink:#e8eaed;--mut:#9aa3af;--acc:#2dd4bf;--acc2:#0ea5e9;--line:#2a2f3a;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);line-height:1.6}
+  header{padding:22px 20px 8px;text-align:center}
+  h1{margin:0;font-size:21px;font-weight:700}
+  .sub{color:var(--mut);font-size:13px;margin-top:4px}
+  .wrap{max-width:1000px;margin:0 auto;padding:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{background:var(--acc);color:#06231f;border:0;border-radius:9px;padding:9px 16px;font-weight:700;cursor:pointer;font-size:14px}
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input[type=file]{color:var(--mut);font-size:13px}
+  label{font-size:13px;color:var(--mut)}
+  input[type=range]{vertical-align:middle}
+  .stage{position:relative;margin-top:12px;overflow:auto;max-height:70vh;border:1px dashed var(--line);border-radius:10px;background:#0a0c10}
+  canvas{display:block;cursor:crosshair;max-width:100%}
+  .hint{font-size:13px;color:var(--mut)}
+  .steps{font-size:13px;color:var(--mut);margin:6px 0 0;padding-left:18px}
+  .steps li{margin:2px 0}
+  .ok{color:var(--acc)} .warn{color:#fbbf24}
+  .queue{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .qchip{font-size:12px;padding:4px 8px;border:1px solid var(--line);border-radius:7px;color:var(--mut);cursor:pointer}
+  .qchip.cur{border-color:var(--acc);color:var(--ink)}
+  .qchip.done{color:var(--acc)}
+  a.dl{color:var(--acc2);font-size:13px}
+  .foot{color:var(--mut);font-size:12px;text-align:center;padding:18px}
+  .kbd{background:#222;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>✦ Gemini 水印去除工具</h1>
+  <div class="sub">反向 Alpha 混合 · 无损还原 · 100% 本地处理（图片不上传）· 支持非标准位置</div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="row">
+      <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+      <button id="auto" class="ghost" disabled>自动定位</button>
+      <label>水印大小 <input id="size" type="range" min="36" max="200" value="100" disabled> <span id="sizev">100</span>px</label>
+      <button id="undo" class="ghost" disabled>撤销</button>
+      <button id="dl" disabled>下载</button>
+    </div>
+    <ol class="steps">
+      <li>选择一张或多张 Gemini 图片（可批量）。</li>
+      <li><b class="ok">在图上点一下那颗白色四角星的中心</b> —— 工具会自动吸附并去除。位置不对就再点一次。</li>
+      <li>大小不合适用滑块微调；满意后点「下载」（导出自动清除 EXIF/C2PA 元数据）。</li>
+    </ol>
+    <div id="status" class="hint">请先选择图片。</div>
+    <div id="queue" class="queue"></div>
+  </div>
+
+  <div class="card" id="stagecard" style="display:none">
+    <div class="hint">点击下方图片中的水印中心 ↓（提示：可放大浏览器页面看清那颗星）</div>
+    <div class="stage"><canvas id="cv"></canvas></div>
+  </div>
+</div>
+
+<div class="foot">
+  只去除「可见白色四角星 + 导出时的元数据」。<b>无法去除隐藏的 SynthID 像素水印</b>（设计上不可可靠去除）。<br>
+  请仅用于处理你自己生成的图片，并遵守相关平台条款；论文用图请按期刊要求披露 AI 生成。<br>
+  算法：Reverse Alpha Blending（向开源社区致谢）。MIT License.
+</div>
+
+<script>
+// ---------- load alpha mask ----------
+const AW=107, AH=107;               // native alpha-map size
+let alpha=null;                     // Float32Array(AW*AH), 0..1
+(function loadAlpha(){
+  const im=new Image();
+  im.onload=()=>{
+    const c=document.createElement('canvas');c.width=AW;c.height=AH;
+    const x=c.getContext('2d');x.drawImage(im,0,0);
+    const d=x.getImageData(0,0,AW,AH).data; alpha=new Float32Array(AW*AH);
+    for(let i=0;i<AW*AH;i++) alpha[i]=d[i*4]/255;   // stored as alpha*255 in red channel
+  };
+  im.src='alpha_map.png';
+})();
+function sampleAlpha(u,v){ // bilinear, u,v in [0,1]
+  let fx=u*(AW-1), fy=v*(AH-1);
+  let x0=Math.floor(fx),y0=Math.floor(fy),x1=Math.min(x0+1,AW-1),y1=Math.min(y0+1,AH-1);
+  let tx=fx-x0,ty=fy-y0;
+  if(x0<0||y0<0||x0>=AW||y0>=AH) return 0;
+  let a00=alpha[y0*AW+x0],a10=alpha[y0*AW+x1],a01=alpha[y1*AW+x0],a11=alpha[y1*AW+x1];
+  return (a00*(1-tx)+a10*tx)*(1-ty)+(a01*(1-tx)+a11*tx)*ty;
+}
+
+// ---------- state ----------
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d',{willReadFrequently:true});
+let files=[], idx=0, orig=null, work=null, W=0, H=0, history=[], defSize=100;
+const $=id=>document.getElementById(id);
+
+$('file').onchange=e=>{ files=[...e.target.files]; idx=0; if(files.length){ buildQueue(); loadImage(0);} };
+
+function buildQueue(){
+  const q=$('queue'); q.innerHTML='';
+  files.forEach((f,i)=>{ const s=document.createElement('span'); s.className='qchip'+(i===idx?' cur':''); s.textContent=(i+1)+'. '+f.name.slice(0,16); s.onclick=()=>loadImage(i); s.id='q'+i; q.appendChild(s); });
+}
+function loadImage(i){
+  idx=i; buildQueue();
+  const f=files[i], im=new Image();
+  im.onload=()=>{
+    W=im.naturalWidth; H=im.naturalHeight; cv.width=W; cv.height=H;
+    ctx.drawImage(im,0,0);
+    orig=ctx.getImageData(0,0,W,H);
+    work=new ImageData(new Uint8ClampedArray(orig.data),W,H);
+    history=[];
+    defSize=(Math.min(W,H)>1024)?100:50; $('size').value=defSize; $('sizev').textContent=defSize;
+    ['auto','size','dl','undo'].forEach(id=>$(id).disabled=false);
+    $('stagecard').style.display='block';
+    $('status').innerHTML='图片已载入（'+W+'×'+H+'）。<b class="ok">点击那颗白色四角星的中心。</b>';
+    render();
+  };
+  im.src=URL.createObjectURL(f);
+}
+
+// neutral-white signal at a pixel (obs - local average, min channel, >=0)
+function whiteAt(data,x,y,rad){
+  if(x<rad||y<rad||x>=W-rad||y>=H-rad) return 0;
+  let i=(y*W+x)*4, br=0,bg=0,bb=0,n=0;
+  for(let dy=-rad;dy<=rad;dy+=rad){for(let dx=-rad;dx<=rad;dx+=rad){let j=((y+dy)*W+(x+dx))*4;br+=data[j];bg+=data[j+1];bb+=data[j+2];n++;}}
+  let ar=data[i]-br/n, ag=data[i+1]-bg/n, ab=data[i+2]-bb/n;
+  return Math.max(0,Math.min(ar,ag,ab));
+}
+// snap click to local neutral-white centroid
+function snap(cx,cy){
+  const d=orig.data, R=14; let sx=0,sy=0,sw=0;
+  for(let y=cy-R;y<=cy+R;y++)for(let x=cx-R;x<=cx+R;x++){
+    if(x<2||y<2||x>=W-2||y>=H-2)continue;
+    let w=whiteAt(d,x,y,3); sw+=w; sx+=w*x; sy+=w*y;
+  }
+  if(sw>40) return [Math.round(sx/sw),Math.round(sy/sw)];
+  return [cx,cy];
+}
+
+function reverseBlend(cx,cy,size){
+  history.push(new Uint8ClampedArray(work.data));
+  if(history.length>12) history.shift();
+  const half=size/2, src=work.data;
+  for(let y=Math.floor(cy-half);y<Math.ceil(cy+half);y++){
+    for(let x=Math.floor(cx-half);x<Math.ceil(cx+half);x++){
+      if(x<0||y<0||x>=W||y>=H) continue;
+      let u=(x-(cx-half))/size, v=(y-(cy-half))/size;
+      let a=sampleAlpha(u,v); if(a<0.012) continue; a=Math.min(a,0.92);
+      let i=(y*W+x)*4, inv=1/(1-a);
+      src[i]  =Math.max(0,Math.min(255,(src[i]  -a*255)*inv));
+      src[i+1]=Math.max(0,Math.min(255,(src[i+1]-a*255)*inv));
+      src[i+2]=Math.max(0,Math.min(255,(src[i+2]-a*255)*inv));
+    }
+  }
+  render(); markDone();
+}
+function render(){ ctx.putImageData(work,0,0); }
+function markDone(){ const c=$('q'+idx); if(c)c.className='qchip cur done'; }
+
+cv.onclick=e=>{
+  const r=cv.getBoundingClientRect(), sc=cv.width/r.width;
+  let x=Math.round((e.clientX-r.left)*sc), y=Math.round((e.clientY-r.top)*sc);
+  [x,y]=snap(x,y);
+  reverseBlend(x,y,parseInt($('size').value));
+  $('status').innerHTML='已去除一处 ✦（中心 '+x+','+y+'）。不干净就再点一次，或调「水印大小」。';
+};
+
+$('size').oninput=()=>{$('sizev').textContent=$('size').value;};
+$('undo').onclick=()=>{ if(history.length){ work.data.set(history.pop()); render(); } };
+$('auto').onclick=()=>{
+  // best-effort auto: search bottom-right region for strongest neutral-white star-ish peak
+  const d=orig.data; let best=-1,bx=0,by=0;
+  for(let y=Math.floor(H*0.62);y<H-30;y+=4){ for(let x=Math.floor(W*0.62);x<W-30;x+=4){
+    let w=whiteAt(d,x,y,8); if(w>best){best=w;bx=x;by=y;}
+  }}
+  if(best>6){ let [sx,sy]=snap(bx,by); reverseBlend(sx,sy,parseInt($('size').value)); $('status').innerHTML='自动定位到 ('+sx+','+sy+')。<b class="warn">请核对</b>——不对就「撤销」后手动点击。'; }
+  else $('status').innerHTML='自动没找到明显水印，请手动点击那颗星。';
+};
+$('dl').onclick=()=>{
+  cv.toBlob(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b);
+    a.download=files[idx].name.replace(/\.(jpe?g|webp|png)$/i,'')+'_no-watermark.png'; a.click();
+    $('status').innerHTML='已下载（PNG，已清除元数据）。'+(idx<files.length-1?' 可点队列里下一张继续。':'');
+  },'image/png');
+};
+</script>
+</body>
+</html>
