@@ -53,7 +53,7 @@
     </div>
     <ol class="steps">
       <li>选择一张或多张 Gemini 图片（可批量）。</li>
-      <li><b class="ok">在图上点一下那颗白色四角星的中心</b> —— 工具会自动吸附并去除。位置不对就再点一次。</li>
+      <li><b class="ok">在那颗白色四角星附近点一下(不用点准)</b> —— 工具按对称性自动吸附到星的正中心并去除。没去掉就再点一次,大小不合用滑块微调。</li>
       <li>大小不合适用滑块微调；满意后点「下载」（导出自动清除 EXIF/C2PA 元数据）。</li>
     </ol>
     <div id="status" class="hint">请先选择图片。</div>
@@ -132,15 +132,31 @@ function whiteAt(data,x,y,rad){
   let ar=data[i]-br/n, ag=data[i+1]-bg/n, ab=data[i+2]-bb/n;
   return Math.max(0,Math.min(ar,ag,ab));
 }
-// snap click to local neutral-white centroid
-function snap(cx,cy){
-  const d=orig.data, R=14; let sx=0,sy=0,sw=0;
-  for(let y=cy-R;y<=cy+R;y++)for(let x=cx-R;x<=cx+R;x++){
-    if(x<2||y<2||x>=W-2||y>=H-2)continue;
-    let w=whiteAt(d,x,y,3); sw+=w; sx+=w*x; sy+=w*y;
+// D4-symmetry ratio of an SxS patch (the Gemini star is highly symmetric; text/arrows are not)
+function d4ratio(P,S){
+  let mean=0; for(let k=0;k<S*S;k++) mean+=P[k]; mean/=S*S;
+  const ix=(r,c)=>r*S+c; let es=0,et=0;
+  for(let r=0;r<S;r++)for(let c=0;c<S;c++){
+    let s=(P[ix(r,c)]+P[ix(c,S-1-r)]+P[ix(S-1-r,S-1-c)]+P[ix(S-1-c,r)]+
+           P[ix(r,S-1-c)]+P[ix(S-1-r,c)]+P[ix(c,r)]+P[ix(S-1-c,S-1-r)])/8;
+    let pc=P[ix(r,c)]-mean, sc=s-mean; et+=pc*pc; es+=sc*sc;
   }
-  if(sw>40) return [Math.round(sx/sw),Math.round(sy/sw)];
-  return [cx,cy];
+  return et>1e-6 ? es/et : 0;
+}
+// forgiving snap: a loose click near the star locks onto the exact center via local symmetry
+function snap(cx,cy){
+  const d=orig.data, S=11, step=8; let best=[-1,cx,cy];
+  for(let oy=-24;oy<=24;oy+=3)for(let ox=-24;ox<=24;ox+=3){
+    let ccx=cx+ox, ccy=cy+oy, P=[], sum=0;
+    for(let r=0;r<S;r++)for(let c=0;c<S;c++){
+      let px=ccx+((c-(S-1)/2)*step|0), py=ccy+((r-(S-1)/2)*step|0);
+      let v=whiteAt(d,px,py,6); P.push(v); sum+=v;
+    }
+    let mean=sum/(S*S); if(mean<1.0) continue;
+    let score=d4ratio(P,S)*mean;
+    if(score>best[0]) best=[score,ccx,ccy];
+  }
+  return [best[1],best[2]];
 }
 
 function reverseBlend(cx,cy,size){
