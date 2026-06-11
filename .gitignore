@@ -1,4 +1,6 @@
-﻿_devtest.py
 __pycache__/
 *.pyc
-sparkle_alpha.npy
+train/model.pth
+_*.py
+_*.png
+_*.npy

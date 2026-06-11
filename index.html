@@ -35,25 +35,26 @@
   .foot{color:var(--mut);font-size:12px;text-align:center;padding:18px}
   .kbd{background:#222;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12px}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
 </head>
 <body>
 <header>
   <h1>✦ Gemini 水印去除工具</h1>
-  <div class="sub">反向 Alpha 混合 · 无损还原 · 100% 本地处理（图片不上传）· 支持非标准位置</div>
+  <div class="sub">AI 自动检测 + 反向 Alpha 混合无损还原 · 100% 本地处理（图片不上传）· 支持任意位置</div>
 </header>
 
 <div class="wrap">
   <div class="card">
     <div class="row">
       <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple>
-      <button id="auto" class="ghost" disabled>自动定位</button>
+      <button id="auto" disabled>🤖 AI 自动去除</button>
       <label>水印大小 <input id="size" type="range" min="36" max="200" value="100" disabled> <span id="sizev">100</span>px</label>
       <button id="undo" class="ghost" disabled>撤销</button>
       <button id="dl" disabled>下载</button>
     </div>
     <ol class="steps">
       <li>选择一张或多张 Gemini 图片（可批量）。</li>
-      <li><b class="ok">在那颗白色四角星附近点一下(不用点准)</b> —— 工具按对称性自动吸附到星的正中心并去除。没去掉就再点一次,大小不合用滑块微调。</li>
+      <li><b class="ok">上传后 AI 会自动检测并去除水印</b>(纯本地,图片不上传)。若提示"没把握",就<b class="ok">在那颗星附近点一下</b>(不用点准,会自动吸附)。</li>
       <li>大小不合适用滑块微调；满意后点「下载」（导出自动清除 EXIF/C2PA 元数据）。</li>
     </ol>
     <div id="status" class="hint">请先选择图片。</div>
@@ -86,6 +87,39 @@ let alpha=null;                     // Float32Array(AW*AH), 0..1
   };
   im.src='alpha_map.png';
 })();
+
+// ---------- ONNX auto-detector (finds the watermark, no click needed) ----------
+let session=null, sessionReady=false;
+(async function loadModel(){
+  try{ session=await ort.InferenceSession.create('model.onnx',{executionProviders:['wasm']}); sessionReady=true; }
+  catch(e){ console.warn('model load failed',e); }
+})();
+async function autoDetect(){
+  if(!sessionReady||!orig) return null;
+  const rx0=Math.floor(W*0.45), ry0=Math.floor(H*0.45);
+  const rw=W-rx0, rh=H-ry0, d=orig.data, N=rw*rh;
+  const inp=new Float32Array(3*N);
+  for(let y=0;y<rh;y++){ const row=(ry0+y)*W, pr=y*rw;
+    for(let x=0;x<rw;x++){ const o=(row+rx0+x)*4, p=pr+x;
+      inp[p]=d[o]/255; inp[N+p]=d[o+1]/255; inp[2*N+p]=d[o+2]/255; } }
+  const out=await session.run({input:new ort.Tensor('float32',inp,[1,3,rh,rw])});
+  const hm=out.heatmap, hd=hm.data, hw=hm.dims[3];
+  let mx=-1,mi=0; for(let i=0;i<hd.length;i++) if(hd[i]>mx){mx=hd[i];mi=i;}
+  return {cx:rx0+(mi%hw)*4, cy:ry0+((mi/hw)|0)*4, conf:mx};
+}
+async function autoRun(){
+  if(!sessionReady){ $('status').innerHTML='🤖 模型还在加载,稍等几秒再试「自动去除」,或直接点那颗星。'; return; }
+  $('status').innerHTML='🔍 正在自动检测水印…';
+  let det=null; try{ det=await autoDetect(); }catch(e){ console.warn(e); }
+  if(det && det.conf>0.35){
+    const [sx,sy]=snap(det.cx,det.cy);
+    reverseBlend(sx,sy,parseInt($('size').value));
+    $('status').innerHTML='✅ 已自动去除(置信度 '+det.conf.toFixed(2)+')。不干净就直接点那颗星补一下。';
+  } else {
+    $('status').innerHTML='⚠️ 这张自动没把握'+(det?'(置信度 '+det.conf.toFixed(2)+')':'')+',请<b class="ok">点一下那颗星</b>。';
+  }
+}
+
 function sampleAlpha(u,v){ // bilinear, u,v in [0,1]
   let fx=u*(AW-1), fy=v*(AH-1);
   let x0=Math.floor(fx),y0=Math.floor(fy),x1=Math.min(x0+1,AW-1),y1=Math.min(y0+1,AH-1);
@@ -118,8 +152,9 @@ function loadImage(i){
     defSize=(Math.min(W,H)>1024)?100:50; $('size').value=defSize; $('sizev').textContent=defSize;
     ['auto','size','dl','undo'].forEach(id=>$(id).disabled=false);
     $('stagecard').style.display='block';
-    $('status').innerHTML='图片已载入（'+W+'×'+H+'）。<b class="ok">点击那颗白色四角星的中心。</b>';
+    $('status').innerHTML='图片已载入（'+W+'×'+H+'）。🔍 正在自动检测水印…';
     render();
+    autoRun();
   };
   im.src=URL.createObjectURL(f);
 }
@@ -210,15 +245,7 @@ cv.onclick=e=>{
 
 $('size').oninput=()=>{$('sizev').textContent=$('size').value;};
 $('undo').onclick=()=>{ if(history.length){ work.data.set(history.pop()); render(); } };
-$('auto').onclick=()=>{
-  // best-effort auto: search bottom-right region for strongest neutral-white star-ish peak
-  const d=orig.data; let best=-1,bx=0,by=0;
-  for(let y=Math.floor(H*0.62);y<H-30;y+=4){ for(let x=Math.floor(W*0.62);x<W-30;x+=4){
-    let w=whiteAt(d,x,y,8); if(w>best){best=w;bx=x;by=y;}
-  }}
-  if(best>6){ let [sx,sy]=snap(bx,by); reverseBlend(sx,sy,parseInt($('size').value)); $('status').innerHTML='自动定位到 ('+sx+','+sy+')。<b class="warn">请核对</b>——不对就「撤销」后手动点击。'; }
-  else $('status').innerHTML='自动没找到明显水印，请手动点击那颗星。';
-};
+$('auto').onclick=autoRun;
 $('dl').onclick=()=>{
   cv.toBlob(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b);
     a.download=files[idx].name.replace(/\.(jpe?g|webp|png)$/i,'')+'_no-watermark.png'; a.click();
