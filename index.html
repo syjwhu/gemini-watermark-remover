@@ -35,7 +35,7 @@
   .foot{color:var(--mut);font-size:12px;text-align:center;padding:18px}
   .kbd{background:#222;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12px}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
 </head>
 <body>
 <header>
@@ -89,27 +89,39 @@ let alpha=null;                     // Float32Array(AW*AH), 0..1
 })();
 
 // ---------- ONNX auto-detector (finds the watermark, no click needed) ----------
-let session=null, sessionReady=false;
-(async function loadModel(){
-  try{ session=await ort.InferenceSession.create('model.onnx',{executionProviders:['wasm']}); sessionReady=true; }
-  catch(e){ console.warn('model load failed',e); }
-})();
+let session=null, sessionReady=false, modelLoading=false;
+async function ensureModel(){
+  if(sessionReady||modelLoading) return;
+  modelLoading=true;
+  try{
+    if(window.ort && ort.env && ort.env.wasm){ ort.env.wasm.numThreads=1; }
+    session=await ort.InferenceSession.create('model.onnx',{executionProviders:['wasm']});
+    sessionReady=true;
+  }catch(e){ console.warn('model load failed',e); }
+  modelLoading=false;
+}
 async function autoDetect(){
   if(!sessionReady||!orig) return null;
-  const rx0=Math.floor(W*0.45), ry0=Math.floor(H*0.45);
-  const rw=W-rx0, rh=H-ry0, d=orig.data, N=rw*rh;
-  const inp=new Float32Array(3*N);
-  for(let y=0;y<rh;y++){ const row=(ry0+y)*W, pr=y*rw;
-    for(let x=0;x<rw;x++){ const o=(row+rx0+x)*4, p=pr+x;
-      inp[p]=d[o]/255; inp[N+p]=d[o+1]/255; inp[2*N+p]=d[o+2]/255; } }
-  const out=await session.run({input:new ort.Tensor('float32',inp,[1,3,rh,rw])});
+  const rx0=Math.floor(W*0.45), ry0=Math.floor(H*0.45), rw=W-rx0, rh=H-ry0;
+  // downsample the bottom-right region so inference is fast (watermark stays in trained size range)
+  const sc=Math.min(1, 820/Math.max(rw,rh));
+  const dw=Math.max(8,Math.round(rw*sc)), dh=Math.max(8,Math.round(rh*sc));
+  const tmp=document.createElement('canvas'); tmp.width=dw; tmp.height=dh;
+  tmp.getContext('2d').drawImage(cv, rx0,ry0,rw,rh, 0,0,dw,dh);
+  const id=tmp.getContext('2d').getImageData(0,0,dw,dh).data, N=dw*dh, inp=new Float32Array(3*N);
+  for(let i=0;i<N;i++){ inp[i]=id[i*4]/255; inp[N+i]=id[i*4+1]/255; inp[2*N+i]=id[i*4+2]/255; }
+  const out=await session.run({input:new ort.Tensor('float32',inp,[1,3,dh,dw])});
   const hm=out.heatmap, hd=hm.data, hw=hm.dims[3];
   let mx=-1,mi=0; for(let i=0;i<hd.length;i++) if(hd[i]>mx){mx=hd[i];mi=i;}
-  return {cx:rx0+(mi%hw)*4, cy:ry0+((mi/hw)|0)*4, conf:mx};
+  const px=(mi%hw)*4, py=((mi/hw)|0)*4;
+  return {cx: rx0+Math.round(px/sc), cy: ry0+Math.round(py/sc), conf: mx};
 }
 async function autoRun(){
-  if(!sessionReady){ $('status').innerHTML='🤖 模型还在加载,稍等几秒再试「自动去除」,或直接点那颗星。'; return; }
+  if(!window.ort){ $('status').innerHTML='⚠️ AI 运行时未加载(检查网络),请直接点那颗星。'; return; }
+  if(!sessionReady){ $('status').innerHTML='🤖 首次加载 AI 模型（约 10MB,仅一次,请稍候）…'; await ensureModel(); }
+  if(!sessionReady){ $('status').innerHTML='⚠️ AI 模型加载失败,请直接点那颗星。'; return; }
   $('status').innerHTML='🔍 正在自动检测水印…';
+  await new Promise(r=>setTimeout(r,30));
   let det=null; try{ det=await autoDetect(); }catch(e){ console.warn(e); }
   if(det && det.conf>0.35){
     const [sx,sy]=snap(det.cx,det.cy);
